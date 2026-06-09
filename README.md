@@ -1,6 +1,10 @@
 # Single-Cycle ARMv8 CPU in Verilog
 
-This project implements a single-cycle ARMv8-style processor in Verilog for ECEN 350.  
+## CPU Datapath
+
+![CPU Datapath](full_datapathcontrol.png)
+
+This project implements a single-cycle ARMv8-style processor in Verilog for ECEN 350 at Texas A&M University. 
 The CPU supports instruction fetch, register file access, ALU execution, data memory access, writeback, and PC update logic.
 
 ## Main Features
