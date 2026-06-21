@@ -33,7 +33,7 @@ module ah_core (
     // ================= IF (synchronous instruction memory) ============
     reg  [63:0] pc;
     wire [31:0] if_instr;                 // imem output: valid one cycle after addr
-    // instruction fetch is port A of the unified memory (instantiated in MEM)
+    ah_imem u_imem (.clk(clk), .addr(pc), .instr(if_instr));
 
     // ===================== IF/ID ======================
     reg [63:0] ifid_pc;
@@ -58,7 +58,6 @@ module ah_core (
     wire        id_ecall   = id_priv && (id_funct12 == 12'h000);
     wire        id_ebreak  = id_priv && (id_funct12 == 12'h001);
     wire        id_mret    = id_priv && (id_funct12 == 12'h302);
-    wire        id_sret    = id_priv && (id_funct12 == 12'h102);
     wire [11:0] id_csr_addr= id_instr[31:20];
     wire [1:0]  id_csr_cmd = id_funct3[1:0];     // 01=write 10=set 11=clear
     wire        id_csr_imm = id_funct3[2];       // immediate form (zimm in rs1 field)
@@ -110,7 +109,7 @@ module ah_core (
     reg        idex_aluword, idex_alusrcb, idex_regwrite, idex_memread, idex_memwrite;
     reg        idex_branch, idex_jump, idex_jalr, idex_ebreak;
     reg        idex_valid;                          // 1 = real instruction (not a bubble)
-    reg        idex_csr, idex_ecall, idex_mret, idex_csr_imm, idex_sret;
+    reg        idex_csr, idex_ecall, idex_mret, idex_csr_imm;
     reg [11:0] idex_csr_addr;
     reg [1:0]  idex_csr_cmd;
     reg        idex_is_muldiv, idex_md_word;
@@ -207,9 +206,8 @@ module ah_core (
     wire [63:0] ex_target = idex_jalr ? ((ex_a + idex_imm) & ~64'd1) : (idex_pc + idex_imm);
 
     // ---------------- CSRs + traps ----------------
-    wire [63:0] csr_rdata, trap_vec_o, ret_target_o, satp_o;
-    wire [1:0]  cur_priv;
-    wire        sum_o, mxr_o, irq_timer;
+    wire [63:0] csr_rdata, mtvec_o, mepc_o;
+    wire        irq_timer;
     // operand for set/clear/write: register rs1 (forwarded) or the 5-bit zimm
     wire [63:0] csr_operand = idex_csr_imm ? {59'd0, idex_rs1} : ex_a;
     wire [63:0] csr_new = (idex_csr_cmd==2'b01) ? csr_operand :
@@ -217,31 +215,27 @@ module ah_core (
                                                   (csr_rdata & ~csr_operand);
     wire ex_is_ecall = idex_ecall & idex_valid;
     wire ex_is_mret  = idex_mret  & idex_valid;
-    wire ex_is_sret  = idex_sret  & idex_valid;
     // a timer interrupt is taken on the valid instruction in EX (re-run later);
-    // it does not pre-empt an ecall / mret / sret instruction.
-    wire ex_take_irq = irq_timer & idex_valid & ~ex_is_ecall & ~ex_is_mret & ~ex_is_sret;
+    // it does not pre-empt an ecall or mret instruction.
+    wire ex_take_irq = irq_timer & idex_valid & ~ex_is_ecall & ~ex_is_mret;
     wire ex_trap     = ex_take_irq | ex_is_ecall;
-    wire ex_ret_go   = ex_is_mret | ex_is_sret;
-    // ecall cause depends on the current privilege: U=8, S=9, M=11 (= 8 + priv)
-    wire [63:0] trap_cause = ex_take_irq ? {1'b1, 63'd7} : (64'd8 + {62'd0, cur_priv});
+    wire ex_mret_go  = ex_is_mret;
+    wire [63:0] trap_cause = ex_take_irq ? {1'b1, 63'd7} : 64'd11;  // m-timer irq : ecall-from-M
     wire        csr_we = idex_csr & idex_valid & ~ex_trap;          // squashed instr doesn't write
 
     ah_csr u_csr (
         .clk(clk), .rst(rst),
         .raddr(idex_csr_addr), .rdata(csr_rdata),
         .we(csr_we), .waddr(idex_csr_addr), .wdata(csr_new),
-        .trap_set(ex_trap), .trap_epc(idex_pc), .trap_cause(trap_cause), .trap_tval(64'd0),
-        .ret_set(ex_ret_go), .ret_is_sret(ex_is_sret), .i_mtip(i_mtip),
-        .trap_vec_o(trap_vec_o), .ret_target_o(ret_target_o),
-        .priv_o(cur_priv), .satp_o(satp_o), .sum_o(sum_o), .mxr_o(mxr_o),
-        .irq_timer(irq_timer)
+        .trap_set(ex_trap), .trap_epc(idex_pc), .trap_cause(trap_cause),
+        .mret_set(ex_mret_go), .i_mtip(i_mtip),
+        .mtvec_o(mtvec_o), .mepc_o(mepc_o), .irq_timer(irq_timer)
     );
 
-    // unified redirect: trap (-> mtvec/stvec) > mret/sret (-> mepc/sepc) > branch/jump
-    wire        ex_redirect_any = ex_trap | ex_ret_go | ex_br_redirect;
-    wire [63:0] ex_redirect_tgt = ex_trap   ? trap_vec_o   :
-                                  ex_ret_go  ? ret_target_o : ex_target;
+    // unified redirect: trap (-> mtvec) > mret (-> mepc) > branch/jump
+    wire        ex_redirect_any = ex_trap | ex_mret_go | ex_br_redirect;
+    wire [63:0] ex_redirect_tgt = ex_trap   ? mtvec_o :
+                                  ex_mret_go ? mepc_o  : ex_target;
 
     reg [63:0] ex_result;
     always @(*) begin
@@ -269,17 +263,14 @@ module ah_core (
     wire        dmem_we_n = idex_memwrite & idex_valid & ~ex_is_mmio & ~ex_trap;
     wire        dmem_re_n = idex_memread  & idex_valid;
     wire        dmem_amo  = amo_do_read | amo_do_write;
-    // Unified physical RAM (base 0x8000_0000): port A fetches instructions,
-    // port B handles all RAM loads/stores (and the atomics' read-modify-write).
-    ah_mem u_mem (
+    ah_dmem u_dmem (
         .clk(clk),
-        .a_addr(pc), .a_rdata(if_instr),
-        .b_addr  ( dmem_amo ? amo_addr_c  : alu_y ),
-        .b_wdata ( dmem_amo ? amo_wdata_c : ex_rs2 ),
-        .b_funct3( dmem_amo ? amo_f3      : idex_funct3 ),
-        .b_re ( dmem_re_n | amo_do_read ),
-        .b_we ( dmem_we_n | amo_do_write ),
-        .b_rdata(mem_load)
+        .addr   ( dmem_amo ? amo_addr_c  : alu_y ),
+        .wdata  ( dmem_amo ? amo_wdata_c : ex_rs2 ),
+        .funct3 ( dmem_amo ? amo_f3      : idex_funct3 ),
+        .mem_read ( dmem_re_n | amo_do_read ),
+        .mem_write( dmem_we_n | amo_do_write ),
+        .rdata(mem_load)
     );
     // loads from the MMIO region (0x1000_0000..0x1FFF_FFFF) take their data
     // from the external peripheral bus instead of the data memory.
@@ -314,12 +305,12 @@ module ah_core (
     integer dummy;
     always @(posedge clk) begin
         if (rst) begin
-            pc <= 64'h80000000; halted <= 1'b0; stop_fetch <= 1'b0;
+            pc <= 64'd0; halted <= 1'b0; stop_fetch <= 1'b0;
             ifid_pc <= 0; ifid_bubble <= 1'b1; hold_valid <= 0; hold_instr <= NOP;
             idex_regwrite<=0; idex_memread<=0; idex_memwrite<=0;
             idex_branch<=0; idex_jump<=0; idex_jalr<=0; idex_ebreak<=0;
             idex_rd<=0; idex_wbsel<=0;
-            idex_valid<=0; idex_csr<=0; idex_ecall<=0; idex_mret<=0; idex_sret<=0;
+            idex_valid<=0; idex_csr<=0; idex_ecall<=0; idex_mret<=0;
             idex_is_muldiv<=0; md_started<=0;
             idex_is_amo<=0; amo_state<=AMO_IDLE; resv_valid<=0;
             exmem_we<=0; exmem_memread<=0; exmem_memwrite<=0; exmem_is_load<=0;
@@ -350,7 +341,7 @@ module ah_core (
                 idex_regwrite<=0; idex_memread<=0; idex_memwrite<=0;
                 idex_branch<=0; idex_jump<=0; idex_jalr<=0; idex_ebreak<=0;
                 idex_rd<=0; idex_wbsel<=0;
-                idex_valid<=0; idex_csr<=0; idex_ecall<=0; idex_mret<=0; idex_sret<=0;
+                idex_valid<=0; idex_csr<=0; idex_ecall<=0; idex_mret<=0;
                 idex_is_muldiv<=0; idex_is_amo<=0;
             end else begin
                 idex_pc<=ifid_pc; idex_rs1d<=id_rs1d; idex_rs2d<=id_rs2d; idex_imm<=id_imm;
@@ -359,7 +350,7 @@ module ah_core (
                 idex_regwrite<=id_regwrite_eff; idex_memread<=id_memread; idex_memwrite<=id_memwrite;
                 idex_branch<=id_branch; idex_jump<=id_jump; idex_jalr<=id_jalr;
                 idex_wbsel<=id_wbsel_eff; idex_ebreak<=id_ebreak;
-                idex_valid<=1'b1; idex_csr<=id_csr; idex_ecall<=id_ecall; idex_mret<=id_mret; idex_sret<=id_sret;
+                idex_valid<=1'b1; idex_csr<=id_csr; idex_ecall<=id_ecall; idex_mret<=id_mret;
                 idex_csr_addr<=id_csr_addr; idex_csr_cmd<=id_csr_cmd; idex_csr_imm<=id_csr_imm;
                 idex_is_muldiv<=id_is_muldiv; idex_md_word<=id_md_word;
                 idex_is_amo<=id_is_amo; idex_amo_f5<=id_amo_f5; idex_amo_word<=id_amo_word;
