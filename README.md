@@ -1,4 +1,4 @@
-# AH-RISCV — CPU
+# AH-RISCV - CPU
 
 A **64-bit RISC-V CPU (RV64IMA)** designed from scratch in Verilog by
 **Ali Hussein**, with a board wrapper and pin constraints for the Digilent
@@ -129,9 +129,9 @@ tools/  ah_asm.py — a tiny RV64I instruction encoder
 
 ## License
 
-GPL-3.0 — see project LICENSE. Reuse is welcome but **must** keep attribution and
+GPL-3.0 - see project LICENSE. Reuse is welcome but **must** keep attribution and
 stay open-source. The hardware signature in `ah_signature.v` is part of the design.
 
 ## Author
 
-**Ali Hussein** — 2026 · [github.com/King1Thor/ah-riscv](https://github.com/King1Thor/ah-riscv)
+**Ali Hussein** - 2026 · [github.com/King1Thor/Hardware-Project](https://github.com/King1Thor/Hardware-Project/)
